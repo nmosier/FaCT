@@ -198,17 +198,24 @@ class typechecker =
 
     method param =
       wrap @@ fun p -> function
-        | Ast.Param(x,bty) ->
-          let lookahead_lexpr =
+                    | Ast.Param(x,bty) ->
+                       let lookahead_lexpr =
             match bty.data with
               | Ast.Arr (_,{data=Ast.LExpression {data=Ast.Variable x_len}},_) ->
                 Some (p @> LDynamic x_len)
               | _ -> None
           in
           let bty' = visit#bty ?lookahead_lexpr bty in
-            _vmap <- (x,bty') :: _vmap;
-            Param(x,bty')
-
+          _vmap <- (x,bty') :: _vmap;
+          begin
+            match bty'.data with
+            | Tast.Ref (_, _) -> ()
+            | _ ->
+               if (label_of bty').data = Secret then
+                 raise @@ cerr p "secret parameter passed by value";
+          end;
+          Param(x,bty')
+    
     method return pc retstm =
       let p = retstm.pos in
       let stmlbl =
