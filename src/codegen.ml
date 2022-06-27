@@ -7,6 +7,10 @@ open Pseudocode
 
 let built : Llvm.llvalue -> unit = ignore
 
+let label_to_idx lbl' = match lbl' with
+  | Tast.Public -> 1
+  | Tast.Secret -> 0;;
+
 class vardec_collector m =
   object (visit)
     inherit Tastmap.tast_visitor m as super
@@ -192,7 +196,8 @@ class codegen no_inline_asm llctx llmod m =
                          let mdkind = mdkind_id llctx "taint" in
                          let mdvals = get_named_metadata llmod "taint" in
                          let mdval = Array.get mdvals 0 in
-                         set_metadata stackloc mdkind mdval;
+                         (* print_endline (show_base_type bty); *)
+                         visit#set_taint_metadata bty stackloc;
                          mlist_push (x,stackloc) _venv)
                       vars;
                     Array.iter2
@@ -481,8 +486,7 @@ class codegen no_inline_asm llctx llmod m =
              let mdkind = mdkind_id llctx "taint" in
              let mdvals = get_named_metadata llmod "taint" in
              let mdval = Array.get mdvals lbl_idx in
-             set_metadata stackloc mdkind mdval;
-
+             visit#set_taint_metadata bty stackloc ;
              build_store lle stackloc _b |> built;
              stackloc
           | Deref e ->
@@ -631,7 +635,15 @@ class codegen no_inline_asm llctx llmod m =
             let rotr = _get_intrinsic (Rotr (integer_bitwidth (type_of lle1))) in
               (fun a b -> build_call rotr [| a; b |])
       in
-        build_binop lle1 lle2 "" _b
+      build_binop lle1 lle2 "" _b
+
+
+    method set_taint_metadata bty llval =
+      let mdkind = mdkind_id llctx "taint" in
+      let mdvals = get_named_metadata llmod "taint" in
+      let mdval = Array.get mdvals (label_to_idx (Tast_util.label_of bty).data) in
+      set_metadata llval mdkind mdval;
+      ()
 
   end
 

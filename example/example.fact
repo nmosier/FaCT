@@ -1,5 +1,5 @@
 export secret uint32 choose(
-    secret bool cond,
+    secret mut bool cond,
     public uint32 a,
     public uint32 b) {
 
