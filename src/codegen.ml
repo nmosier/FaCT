@@ -128,7 +128,7 @@ class codegen no_inline_asm llctx llmod m =
                             (fun i {data=Field(x,bty)} ->
                                (x, (i, bty)))
                             fields in
-        mlist_push (name, field_entries) _sdecs;
+      mlist_push (name, field_entries) _sdecs;
         let llfields = List.map visit#field fields in
         let justthetypes = List.map (fun (_,bty) -> bty) llfields in
         let llsty = named_struct_type llctx name.data in
@@ -189,7 +189,11 @@ class codegen no_inline_asm llctx llmod m =
                       (fun (x,bty) ->
                          let llty = visit#bty bty in
                          let stackloc = build_alloca llty x.data _b in
-                           mlist_push (x,stackloc) _venv)
+                         let mdkind = mdkind_id llctx "taint" in
+                         let mdvals = get_named_metadata llmod "taint" in
+                         let mdval = Array.get mdvals 0 in
+                         set_metadata stackloc mdkind mdval;
+                         mlist_push (x,stackloc) _venv)
                       vars;
                     Array.iter2
                       (fun llparam {data=Param(x,_)} ->
@@ -467,11 +471,20 @@ class codegen no_inline_asm llctx llmod m =
           | Declassify e
           | Classify e -> visit#expr e
           | Enref e ->
-            let lle = visit#expr e in
-            let lle_bty = type_of lle in
-            let stackloc = build_alloca lle_bty "" _b in
-              build_store lle stackloc _b |> built;
-              stackloc
+             let lbl = Tast_util.label_of bty in
+             let lbl_idx = (match lbl.data with
+                            | Tast.Public -> 1
+                            | Tast.Secret -> 0) in
+             let lle = visit#expr e in
+             let lle_bty = type_of lle in
+             let stackloc = build_alloca lle_bty "" _b in
+             let mdkind = mdkind_id llctx "taint" in
+             let mdvals = get_named_metadata llmod "taint" in
+             let mdval = Array.get mdvals lbl_idx in
+             set_metadata stackloc mdkind mdval;
+
+             build_store lle stackloc _b |> built;
+             stackloc
           | Deref e ->
             let lle = visit#expr e in
               build_load lle "" _b
@@ -625,5 +638,10 @@ class codegen no_inline_asm llctx llmod m =
 let codegen no_inline_asm m =
   let llctx = Llvm.create_context () in
   let llmod = Llvm.create_module llctx "Module" in
+  let taint_secret = const_string llctx "secret" in
+  let taint_public = const_string llctx "public" in
+  let taint_arr = Array.of_list [taint_secret; taint_public] in
+  let mdtaint = mdnode llctx taint_arr in
+  add_named_metadata_operand llmod "taint" mdtaint;
   let visit = new codegen no_inline_asm llctx llmod m in
     visit#fact_module (); llctx, llmod
