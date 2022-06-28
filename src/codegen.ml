@@ -5,7 +5,12 @@ open Tast
 open Llvm
 open Pseudocode
 
-let built : Llvm.llvalue -> unit = ignore
+(* let built : Llvm.llvalue -> unit = ignore *)
+
+let built visit bty llval =
+  match bty with
+  | None -> ()
+  | Some bty -> visit#set_taint_metadata bty llval
 
 let label_to_idx lbl' = match lbl' with
   | Tast.Public -> 1
@@ -193,14 +198,12 @@ class codegen no_inline_asm llctx llmod m =
                       (fun (x,bty) ->
                          let llty = visit#bty bty in
                          let stackloc = build_alloca llty x.data _b in
-                         visit#set_taint_metadata bty stackloc;
                          mlist_push (x,stackloc) _venv)
                       vars;
                     Array.iter2
                       (fun llparam {data=Param(x,bty)} ->
                         let stackloc = visit#_get x in
-                        visit#set_taint_metadata bty stackloc;
-                           build_store llparam stackloc _b |> built)
+                        build_store llparam stackloc _b |> ignore)
                       (Llvm.params llfn)
                       (Array.of_list params);
                   end
@@ -214,6 +217,7 @@ class codegen no_inline_asm llctx llmod m =
                       (Array.of_list params);
                   end;
               visit#block body |> ignore;
+              (*
               (* Set insertion point right before terminator *)
               let After last_inst = Llvm.instr_end (Llvm.entry_block llfn) in
               assert (Llvm.is_terminator last_inst);
@@ -225,6 +229,7 @@ class codegen no_inline_asm llctx llmod m =
                 (Llvm.params llfn)
                 (Array.of_list params);
               Llvm.dump_value llfn;
+               *)
               (* Llvm.instr_end
                *)
               llfn
@@ -257,13 +262,13 @@ class codegen no_inline_asm llctx llmod m =
             let then_bb = append_block llctx "" curfn in
             let else_bb = append_block llctx "" curfn in
             let merge_bb = append_block llctx "" curfn in
-              build_cond_br llcond then_bb else_bb _b |> built;
+              build_cond_br llcond then_bb else_bb _b |> ignore;
               position_at_end then_bb _b;
               if visit#block thens then
-                build_br merge_bb _b |> built;
+                build_br merge_bb _b |> ignore;
               position_at_end else_bb _b;
               if visit#block elses then
-                build_br merge_bb _b |> built;
+                build_br merge_bb _b |> ignore;
               position_at_end merge_bb _b
           | RangeFor (x,bty,e1,e2,blk) ->
             let lle1 = visit#expr e1 in
@@ -279,13 +284,15 @@ class codegen no_inline_asm llctx llmod m =
 
             let load_iter loc =
               if all_vars_indirect
-              then build_load loc "" _b
+              then let load = build_load loc "" _b in
+                   built visit (Some bty) load;
+                   load
               else loc
             in
 
             let store_iter llval loc =
               if all_vars_indirect
-              then build_store llval loc _b |> built
+              then build_store llval loc _b |> ignore
               else add_incoming (llval, insertion_block _b) loc
             in
 
@@ -297,22 +304,22 @@ class codegen no_inline_asm llctx llmod m =
                         mlist_push (x,loc) _venv; loc) in
               let iter = load_iter iterloc in
               let check = build_icmp cmp iter lle2 "" _b in
-                build_cond_br check loop_bb post_bb  _b |> built;
+                build_cond_br check loop_bb post_bb  _b |> ignore;
 
                 position_at_end pre_bb _b;
                 store_iter lle1 iterloc;
-                build_br check_bb _b |> built;
+                build_br check_bb _b |> ignore;
 
                 position_at_end loop_bb _b;
                 if visit#block blk then
-                  build_br iter_bb _b |> built;
+                  build_br iter_bb _b |> ignore;
 
                 position_at_end iter_bb _b;
                 let iter = load_iter iterloc in
                 let one = const_int (type_of iter) 1 in
                 let add = build_add iter one "" _b in
                   store_iter add iterloc;
-                  build_br check_bb _b |> built;
+                  build_br check_bb _b |> ignore;
 
                   position_at_end post_bb _b
           | ArrayFor (x,bty,e,blk) ->
@@ -328,52 +335,55 @@ class codegen no_inline_asm llctx llmod m =
               if all_vars_indirect then
                 let xloc = visit#_get x in
                 let iterloc = build_alloca i64ty "" _b in
-                  build_store (const_null i64ty) iterloc _b |> built;
-                  build_br check_bb _b |> built;
+                  build_store (const_null i64ty) iterloc _b;
+                  build_br check_bb _b;
 
                   position_at_end check_bb _b;
                   let iter = build_load iterloc "" _b in
+                  built visit (Some bty) iter;
                   let check = build_icmp Icmp.Ult iter lllen "" _b in
-                    build_cond_br check loop_bb post_bb  _b |> built;
+                    build_cond_br check loop_bb post_bb _b;
 
                     position_at_end loop_bb _b;
                     let iter = build_load iterloc "" _b in
+                    built visit (Some bty) iter;
                     let gep = build_gep lle [| iter |] "" _b in
                     let load = build_load gep "" _b in
-                      build_store load xloc _b |> built;
+                    built visit (Some (Tast_util.type_of e)) load;
+                      build_store load xloc _b;
                       if visit#block blk then
-                        build_br iter_bb _b |> built;
+                        build_br iter_bb _b |> ignore;
 
                     position_at_end iter_bb _b;
                     let iter = build_load iterloc "" _b in
+                    built visit (Some bty) iter;
                     let one = const_int (type_of iter) 1 in
                     let add = build_add iter one "" _b in
-                      build_store add iterloc _b |> built;
-                      build_br check_bb _b |> built;
-
+                      build_store add iterloc _b;
+                      build_br check_bb _b;
                       position_at_end post_bb _b
               else
                 begin
-                  build_br check_bb _b |> built;
-
+                  build_br check_bb _b;
                   position_at_end check_bb _b;
                   let zero = const_null i64ty in
                   let iter = build_phi [ (zero, pre_bb) ] "" _b in
                   let check = build_icmp Icmp.Ult iter lllen "" _b in
-                    build_cond_br check loop_bb post_bb  _b |> built;
+                    build_cond_br check loop_bb post_bb  _b;
 
                     position_at_end loop_bb _b;
                     let gep = build_gep lle [| iter |] "" _b in
                     let load = build_load gep "" _b in
+                    built visit (Some (Tast_util.type_of e)) load;
                       mlist_push (x,load) _venv;
                       if visit#block blk then
-                        build_br iter_bb _b |> built;
+                        build_br iter_bb _b |> ignore;
 
                       position_at_end iter_bb _b;
                       let one = const_int (type_of iter) 1 in
                       let add = build_add iter one "" _b in
                         add_incoming (add, iter_bb) iter;
-                        build_br check_bb _b |> built;
+                        build_br check_bb _b;
 
                         position_at_end post_bb _b
                 end
@@ -389,9 +399,9 @@ class codegen no_inline_asm llctx llmod m =
             visit#block blk
         | Return e ->
           let lle = visit#expr e in
-            build_ret lle _b |> built;
-            false
-        | VoidReturn -> build_ret_void _b |> built;
+          build_ret lle _b;
+          false
+        | VoidReturn -> build_ret_void _b;
           false
         | End -> true
 
@@ -401,7 +411,7 @@ class codegen no_inline_asm llctx llmod m =
           let lle = visit#expr e in
             if all_vars_indirect then
               let loc = visit#_get x in
-                build_store lle loc _b |> built
+                build_store lle loc _b |> ignore
             else
               begin
                 set_value_name x.data lle;
@@ -413,7 +423,7 @@ class codegen no_inline_asm llctx llmod m =
           let call = build_call llfn llargs "" _b in
             if all_vars_indirect then
               let loc = visit#_get x in
-                build_store call loc _b |> built
+                build_store call loc _b |> ignore
             else
               begin
                 set_value_name x.data call;
@@ -422,31 +432,32 @@ class codegen no_inline_asm llctx llmod m =
         | VoidFnCall (fn,args) ->
           let llfn = visit#_fget fn in
           let llargs = List.map visit#expr args |> Array.of_list in
-            build_call llfn llargs "" _b |> built
+          build_call llfn llargs "" _b |> ignore
         | Assign (e1,e2) ->
           let lle1 = visit#expr e1 in
           let lle2 = visit#expr e2 in
-            build_store lle2 lle1 _b |> built
+          build_store lle2 lle1 _b |> ignore
         | Cmov (e1,cond,e2) ->
           let lle1 = visit#expr e1 in
           let lle2 = visit#expr e2 in
           let llcond = visit#expr cond in
           let cmov = _get_intrinsic (_cmov_of_choice (integer_bitwidth (type_of lle2))) in
           let orig = build_load lle1 "" _b in
+          built visit (Some (Tast_util.type_of e1)) orig;
           let result = build_call cmov [| llcond; lle2; orig |] "" _b in
-            build_store result lle1 _b |> built
+            build_store result lle1 _b |> ignore
         | Assume e -> ()
 
     method expr ({pos=p;data},bty) =
       let llbty = visit#bty bty in
-        match data with
+      let llres = match data with
           | True -> const_all_ones i1ty
           | False -> const_null i1ty
           | IntLiteral n -> const_int llbty n
           | Variable x ->
             if all_vars_indirect then
               let loc = visit#_get x in
-                build_load loc "" _b
+              build_load loc "" _b
             else
               visit#_get x
           | Cast (castty,e) ->
@@ -465,24 +476,24 @@ class codegen no_inline_asm llctx llmod m =
               build_cast lle llcastty "" _b
           | UnOp (op,e) ->
             let lle = visit#expr e in
-              visit#unop op lle
+            visit#unop op lle 
           | BinOp (op,e1,e2) ->
             let lle1 = visit#expr e1 in
             let lle2 = visit#expr e2 in
             let e1ty = Tast_util.type_of e1 in
             let is_signed = Tast_util.(not (is_bool e1ty) && is_signed e1ty) in
-              visit#binop op is_signed lle1 lle2
+            visit#binop op is_signed lle1 lle2
           | TernOp (e1,e2,e3) ->
             let lle1 = visit#expr e1 in
             let lle2 = visit#expr e2 in
             let lle3 = visit#expr e3 in
-              build_select lle1 lle2 lle3 "" _b
+            build_select lle1 lle2 lle3 "" _b
           | Select (e1,e2,e3) ->
             let lle1 = visit#expr e1 in
             let lle2 = visit#expr e2 in
             let lle3 = visit#expr e3 in
             let select = _get_intrinsic (_select_of_choice (integer_bitwidth llbty)) in
-              build_call select [| lle1; lle2; lle3 |] "" _b
+            build_call select [| lle1; lle2; lle3 |] "" _b
           | Declassify e
           | Classify e -> visit#expr e
           | Enref e ->
@@ -493,20 +504,15 @@ class codegen no_inline_asm llctx llmod m =
              let lle = visit#expr e in
              let lle_bty = type_of lle in
              let stackloc = build_alloca lle_bty "" _b in
-             let mdkind = mdkind_id llctx "taint" in
-             let mdvals = get_named_metadata llmod "taint" in
-             let mdval = Array.get mdvals lbl_idx in
-             print_endline (show_base_type bty);
-             visit#set_taint_metadata bty stackloc;
-             build_store lle stackloc _b |> built;
+             build_store lle stackloc _b;
              stackloc
           | Deref e ->
             let lle = visit#expr e in
-              build_load lle "" _b
+            build_load lle "" _b
           | ArrayGet (e,lexpr) ->
             let lle = visit#expr e in
             let lllexpr = visit#lexpr lexpr in
-              build_gep lle [| lllexpr |] "" _b
+            build_gep lle [| lllexpr |] "" _b
           | ArrayLit es ->
             let lles = List.map visit#expr es in
             let Some el_ty = Tast_util.element_type bty in
@@ -517,7 +523,7 @@ class codegen no_inline_asm llctx llmod m =
               List.iteri
                 (fun i lle ->
                    let cell = build_gep newarr [| const_int i64ty i |] "" _b in
-                     build_store lle cell _b |> built)
+                     build_store lle cell _b |> ignore)
                 lles;
               newarr
           | ArrayZeros len ->
@@ -526,7 +532,7 @@ class codegen no_inline_asm llctx llmod m =
             let lllen = visit#lexpr len in
             let newarr = build_array_alloca llelty lllen "" _b in
             let memset = _get_intrinsic (Memset (integer_bitwidth llelty)) in
-              build_call memset [| newarr; (const_null i8ty); lllen |] "" _b |> built;
+              build_call memset [| newarr; (const_null i8ty); lllen |] "" _b;
               newarr
           | ArrayCopy e ->
             let Some el_ty = Tast_util.element_type bty in
@@ -536,7 +542,7 @@ class codegen no_inline_asm llctx llmod m =
             let lllen = visit#lexpr len in
             let newarr = build_array_alloca llelty lllen "" _b in
             let memcpy = _get_intrinsic (Memcpy (integer_bitwidth llelty)) in
-              build_call memcpy [| newarr; lle; lllen |] "" _b |> built;
+              build_call memcpy [| newarr; lle; lllen |] "" _b;
               newarr
           | ArrayView (e,start,len) ->
             let lle = visit#expr e in
@@ -570,7 +576,7 @@ class codegen no_inline_asm llctx llmod m =
                        | Bool _
                        | UInt _
                        | Int _ ->
-                         build_store lle loc _b |> built
+                         build_store lle loc _b |> ignore
                        | Arr _ ->
                          let underlying_ty = lle |> type_of |> element_type in
                          let pty = pointer_type underlying_ty in
@@ -578,7 +584,7 @@ class codegen no_inline_asm llctx llmod m =
                          let len = Tast_util.(length_of (type_of e)) in
                          let lllen = visit#lexpr len in
                          let memcpy = _get_intrinsic (Memcpy (integer_bitwidth underlying_ty)) in
-                           build_call memcpy [| casted; lle; lllen |] "" _b |> built
+                           build_call memcpy [| casted; lle; lllen |] "" _b |> ignore
                 )
                 entries;
               space
@@ -591,13 +597,15 @@ class codegen no_inline_asm llctx llmod m =
               begin
                 match classify_type underlying_ty with
                   | TypeKind.Pointer ->
-                    build_load res "" _b
+                     build_load res "" _b
                   | TypeKind.Array ->
                     let pty = underlying_ty |> element_type |> pointer_type in
-                      build_bitcast res pty "" _b
+                    build_bitcast res pty "" _b
                   | _ -> res
               end
-          | _ -> raise @@ cerr p "unimplemented in codegen: %s" (show_expr' data)
+          | _ -> raise @@ cerr p "unimplemented in codegen: %s" (show_expr' data) in
+      built visit (Some bty) llres;
+      llres
 
     method lexpr {pos=p;data} =
       match data with
@@ -605,7 +613,7 @@ class codegen no_inline_asm llctx llmod m =
         | LDynamic x ->
           if all_vars_indirect then
             let loc = visit#_get x in
-              build_load loc "" _b
+            build_load loc "" _b (* TODO: built *)
           else
             visit#_get x
 
@@ -662,14 +670,17 @@ class codegen no_inline_asm llctx llmod m =
      *)
 
     method set_taint_metadata bty llval =
-      let lbl = (Tast_util.label_of bty).data in
-      let lblstr = match lbl with
-        | Secret -> "secret"
-        | Public -> "public" in
-      let mdkind = Llvm.mdkind_id llctx "taint" in
-      let mdnode = Llvm.mdstring llctx lblstr in
-      set_metadata llval mdkind mdnode;
-      ()
+      match Llvm.type_of llval |> Llvm.classify_type with
+      | Integer -> 
+         let lbl = (Tast_util.label_of bty).data in
+         let lblstr = match lbl with
+           | Secret -> "secret"
+           | Public -> "public" in
+         let mdkind = Llvm.mdkind_id llctx "taint" in
+         let mdnode = Llvm.mdstring llctx lblstr in
+         set_metadata llval mdkind mdnode;
+         ()
+      | _ -> ()
 
     (*
     method get_taint_intrinsic_str bty =
