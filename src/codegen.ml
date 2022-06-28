@@ -187,22 +187,19 @@ class codegen no_inline_asm llctx llmod m =
             let bb = entry_block llfn in
               position_at_end bb _b;
               let vars = collect_vardecs fdec in
-                if all_vars_indirect then
+              if all_vars_indirect then
                   begin
                     List.iter
                       (fun (x,bty) ->
                          let llty = visit#bty bty in
                          let stackloc = build_alloca llty x.data _b in
-                         let mdkind = mdkind_id llctx "taint" in
-                         let mdvals = get_named_metadata llmod "taint" in
-                         let mdval = Array.get mdvals 0 in
-                         (* print_endline (show_base_type bty); *)
                          visit#set_taint_metadata bty stackloc;
                          mlist_push (x,stackloc) _venv)
                       vars;
                     Array.iter2
-                      (fun llparam {data=Param(x,_)} ->
-                         let stackloc = visit#_get x in
+                      (fun llparam {data=Param(x,bty)} ->
+                        let stackloc = visit#_get x in
+                        visit#set_taint_metadata bty stackloc;
                            build_store llparam stackloc _b |> built)
                       (Llvm.params llfn)
                       (Array.of_list params);
@@ -216,8 +213,21 @@ class codegen no_inline_asm llctx llmod m =
                       (Llvm.params llfn)
                       (Array.of_list params);
                   end;
-                visit#block body |> ignore;
-                llfn
+              visit#block body |> ignore;
+              (* Set insertion point right before terminator *)
+              let After last_inst = Llvm.instr_end (Llvm.entry_block llfn) in
+              assert (Llvm.is_terminator last_inst);
+              Llvm.position_before last_inst _b;
+              Array.iter2 (fun llparam {data=Param(_,bty)} ->
+                  (* Llvm.position_at_end (Llvm.entry_block llfn) _b; *)
+                  visit#set_taint_metadata2 bty llparam
+                )
+                (Llvm.params llfn)
+                (Array.of_list params);
+              Llvm.dump_value llfn;
+              (* Llvm.instr_end
+               *)
+              llfn
         | CExtern (name,fnattr,rt,params) ->
           let ft = visit#_prototype name rt params in
           let llfn = declare_function name.data ft llmod in
@@ -486,7 +496,8 @@ class codegen no_inline_asm llctx llmod m =
              let mdkind = mdkind_id llctx "taint" in
              let mdvals = get_named_metadata llmod "taint" in
              let mdval = Array.get mdvals lbl_idx in
-             visit#set_taint_metadata bty stackloc ;
+             print_endline (show_base_type bty);
+             visit#set_taint_metadata bty stackloc;
              build_store lle stackloc _b |> built;
              stackloc
           | Deref e ->
@@ -638,13 +649,57 @@ class codegen no_inline_asm llctx llmod m =
       build_binop lle1 lle2 "" _b
 
 
+    (*
     method set_taint_metadata bty llval =
       let mdkind = mdkind_id llctx "taint" in
       let mdvals = get_named_metadata llmod "taint" in
-      let mdval = Array.get mdvals (label_to_idx (Tast_util.label_of bty).data) in
+      let lblidx = label_to_idx (Tast_util.label_of bty).data in
+      print_string "lblidx "; print_int lblidx; print_newline ();
+      print_int (Array.length mdvals); print_newline ();
+      let mdval = Array.get mdvals lblidx in
       set_metadata llval mdkind mdval;
       ()
+     *)
 
+    method set_taint_metadata bty llval =
+      let lbl = (Tast_util.label_of bty).data in
+      let lblstr = match lbl with
+        | Secret -> "secret"
+        | Public -> "public" in
+      let mdkind = Llvm.mdkind_id llctx "taint" in
+      let mdnode = Llvm.mdstring llctx lblstr in
+      set_metadata llval mdkind mdnode;
+      ()
+
+    (*
+    method get_taint_intrinsic_str bty =
+      match (Llvm.classify_type bty) with
+      | Void -> None
+      | Integer -> Some (Printf.sprintf "llvm.annotation.i%d" (integer_bitwidth bty))
+      | Pointer -> 
+     *)
+
+    method set_taint_metadata2 bty llval =
+      let lbl = (Tast_util.label_of bty).data in
+      let lblstr = match lbl with
+        | Secret -> "secret"
+        | Public -> "public" in
+      (*
+      let mdkind = Llvm.mdkind_id llctx "taint" in
+      let mdnode = Llvm.mdstring llctx lblstr in
+       *)
+      let llty = Llvm.type_of llval in
+      match (Llvm.classify_type llty) with
+      | Integer ->
+         (* let intrinsic_str = Printf.sprintf "llvm.annotation.i%d" (integer_bitwidth llty) in *)
+         let intrinsic_str = Printf.sprintf "fact.%s.i%d" lblstr (integer_bitwidth llty) in
+         let intrinsic_ty = Llvm.function_type (Llvm.void_type llctx) [| llty |] in
+         let intrinsic_fn = Llvm.declare_function intrinsic_str intrinsic_ty llmod in
+         build_call intrinsic_fn [| llval |] "" _b;
+         ()
+      | _ -> ()
+
+    
   end
 
 let codegen no_inline_asm m =
@@ -652,7 +707,8 @@ let codegen no_inline_asm m =
   let llmod = Llvm.create_module llctx "Module" in
   let taint_secret = const_string llctx "secret" in
   let taint_public = const_string llctx "public" in
-  let taint_arr = Array.of_list [taint_secret; taint_public] in
+  let taint_arr = Array.of_list [taint_secret; taint_public; taint_public] in
+  print_string "taint_arr len is "; print_int (Array.length taint_arr); print_newline ();
   let mdtaint = mdnode llctx taint_arr in
   add_named_metadata_operand llmod "taint" mdtaint;
   let visit = new codegen no_inline_asm llctx llmod m in
